@@ -136,6 +136,11 @@ class EbpfCollector(EbpfIngressCollector):
         attach: bool = True,
         detach_on_close: bool = True,
         process_enricher: Optional[ProcessSocketEnricher] = None,
+        delivery_attribution: str = "none",
+        receive_object_path: Path = Path("bpf/udp_receive.bpf.o"),
+        receive_loader_path: Path = Path("bpf/udp_receive_loader"),
+        receive_hook: str = "auto",
+        receive_map_id: Optional[int] = None,
     ):
         super().__init__(
             ifname=ifname,
@@ -147,4 +152,9 @@ class EbpfCollector(EbpfIngressCollector):
             attach=attach,
             detach_on_close=detach_on_close,
             process_enricher=process_enricher,
+            delivery_attribution=delivery_attribution,
+            receive_object_path=receive_object_path,
+            receive_loader_path=receive_loader_path,
+            receive_hook=receive_hook,
+            receive_map_id=receive_map_id,
         )
