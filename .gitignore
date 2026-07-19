@@ -9,4 +9,5 @@ dist/
 data/
 *.o
 *.skel.h
-
+/bpf/udp_receive_loader
+/bpf/vmlinux.h

@@ -119,6 +119,7 @@ class ProcessSocketEnricher:
         self.cached_sockets: list[ProcessSocket] = []
 
     def enrich(self, sample: UdpSample) -> list[UdpSample]:
+        """Legacy best-effort enrichment by local address and port."""
         matches = self.find_matches(sample)
         if not matches:
             return [sample]
@@ -139,6 +140,27 @@ class ProcessSocketEnricher:
             )
         return enriched
 
+    def enrich_exact(
+        self, sample: UdpSample, socket_inode: int, socket_cookie: int
+    ) -> list[UdpSample]:
+        """Enrich a kernel-attributed row without repeating port correlation."""
+        attributed = replace(sample, layer="delivered", socket_id=socket_cookie)
+        matches = self.find_inode_matches(socket_inode)
+        if not matches:
+            return [attributed]
+
+        return [
+            replace(
+                attributed,
+                netns_id=match.netns_id,
+                container_id=match.container_id,
+                process_name=match.process_name,
+                host_pid=match.host_pid,
+                container_pid=match.container_pid,
+            )
+            for match in matches
+        ]
+
     def find_matches(self, sample: UdpSample) -> list[ProcessSocket]:
         sockets = self.sockets()
         return [
@@ -146,6 +168,15 @@ class ProcessSocketEnricher:
             for socket_row in sockets
             if socket_row.local_port == sample.dst_port
             and (socket_row.local_ip in {"0.0.0.0", sample.dst_ip})
+        ]
+
+    def find_inode_matches(self, socket_inode: int) -> list[ProcessSocket]:
+        if not socket_inode:
+            return []
+        return [
+            socket_row
+            for socket_row in self.sockets()
+            if socket_row.socket_inode == socket_inode
         ]
 
     def sockets(self) -> list[ProcessSocket]:
@@ -239,4 +270,3 @@ def read_namespace_id(path: Path) -> int:
         except ValueError:
             return 0
     return 0
-

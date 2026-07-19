@@ -53,6 +53,28 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--bpf-section", default="classifier/udp_ingress")
     run.add_argument("--tc-pref", type=int, default=49152)
     run.add_argument(
+        "--delivery-attribution",
+        choices=["auto", "cookie", "legacy", "none"],
+        default=None,
+        help=(
+            "delivered-row backend: auto prefers socket cookies and falls back "
+            "to the legacy port heuristic"
+        ),
+    )
+    run.add_argument("--receive-bpf-object", default="bpf/udp_receive.bpf.o")
+    run.add_argument("--receive-loader", default="bpf/udp_receive_loader")
+    run.add_argument(
+        "--receive-hook",
+        choices=["auto", "fentry", "kprobe"],
+        default="auto",
+        help="receive hook selection; auto prefers fentry and falls back to kprobe",
+    )
+    run.add_argument(
+        "--receive-map-id",
+        type=int,
+        help="existing delivered map ID to read together with --no-attach",
+    )
+    run.add_argument(
         "--no-attach",
         action="store_true",
         help="read an already loaded eBPF map instead of attaching tc filter",
@@ -65,7 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--enrich-processes",
         action="store_true",
-        help="add delivered rows by correlating UDP local ports with /proc sockets",
+        help=(
+            "add delivered rows; prefers receive-side socket cookies and falls "
+            "back to the legacy /proc port heuristic"
+        ),
     )
     run.add_argument("--src-ip")
     run.add_argument("--dst-ip")
@@ -157,8 +182,20 @@ def create_collector(
     if collector_name == "dry-run":
         return DryRunCollector(bucket_ms=bucket_ms, sample_filter=sample_filter)
     if collector_name == "ebpf":
+        delivery_attribution = args.delivery_attribution
+        if delivery_attribution is None:
+            delivery_attribution = (
+                "auto" if args.enrich_processes or args.process_name else "none"
+            )
+        if delivery_attribution == "none" and (
+            args.enrich_processes or args.process_name
+        ):
+            raise RuntimeError(
+                "--enrich-processes/--process-name cannot be combined with "
+                "--delivery-attribution none"
+            )
         process_enricher = None
-        if args.enrich_processes or args.process_name:
+        if delivery_attribution != "none":
             process_enricher = ProcessSocketEnricher(process_name=args.process_name)
         return EbpfCollector(
             bucket_ms=bucket_ms,
@@ -170,6 +207,11 @@ def create_collector(
             attach=not args.no_attach,
             detach_on_close=not args.keep_attached,
             process_enricher=process_enricher,
+            delivery_attribution=delivery_attribution,
+            receive_object_path=Path(args.receive_bpf_object),
+            receive_loader_path=Path(args.receive_loader),
+            receive_hook=args.receive_hook,
+            receive_map_id=args.receive_map_id,
         )
     raise RuntimeError(f"unsupported collector: {collector_name}")
 
