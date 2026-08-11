@@ -157,7 +157,12 @@ class ChannelTcpSample:
             "status": self.status,
             "tcp_state": self.state,
             "bytes": self.tx_bytes + self.rx_bytes,
-            "packets": 0,
+            # Compatibility field for UDP-row consumers. TCP syscall hooks do not
+            # see packets, so report the syscall count instead of a hardcoded 0:
+            # downstream liveness checks divide packets by the interval to get a
+            # rate, and a permanent 0 reads as "stream not flowing" forever even
+            # while bytes keep climbing.
+            "packets": self.rx_calls + self.tx_calls,
         }
 
 
@@ -183,6 +188,47 @@ class TcpChannelLoaderStatus:
     map_id: int
 
 
+#: BTF source used to check the kernel's tcp_recvmsg prototype (world-readable).
+KERNEL_BTF_PATH = "/sys/kernel/btf/vmlinux"
+
+
+def kernel_tcp_recvmsg_has_nonblock(btf_text: Optional[str] = None) -> Optional[bool]:
+    """True = kernel exposes the pre-5.19 tcp_recvmsg(..., int nonblock, ...).
+
+    Commit ec095263a965 (5.19) dropped the `nonblock` parameter; our fexit
+    program declares the NEW signature. On the old one the verifier still
+    accepts the program, but the slot read as `ret` is really the addr_len
+    pointer. None = cannot determine (no bpftool / no BTF) — the caller
+    decides how brave to be.
+    """
+    if btf_text is None:
+        try:
+            proc = subprocess.run(
+                ["bpftool", "btf", "dump", "file", KERNEL_BTF_PATH, "format", "c"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        btf_text = proc.stdout
+    for line in btf_text.splitlines():
+        if "tcp_recvmsg(" in line:
+            return "nonblock" in line
+    return None
+
+
+def refuse_pre519_tcp_recvmsg() -> None:
+    """Hard gate before attach; see kernel_tcp_recvmsg_has_nonblock."""
+    has_nonblock = kernel_tcp_recvmsg_has_nonblock()
+    if has_nonblock:
+        raise RuntimeError(
+            "kernel tcp_recvmsg has the pre-5.19 signature (nonblock parameter): "
+            "the fexit program would silently account garbage as rx_bytes. "
+            "TCP channel attribution requires kernel >= 5.19."
+        )
+
+
 class TcpChannelBpfAttachment:
     def __init__(
         self,
@@ -202,6 +248,12 @@ class TcpChannelBpfAttachment:
             raise RuntimeError(f"TCP channel BPF loader does not exist: {self.loader_path}")
         if not self.object_path.exists():
             raise RuntimeError(f"TCP channel BPF object does not exist: {self.object_path}")
+        # Refuse kernels with the pre-5.19 tcp_recvmsg signature BEFORE attaching.
+        # fexit validates argument access against the KERNEL prototype, so on an
+        # old kernel the program loads cleanly but reads the addr_len POINTER as
+        # "ret": rx_bytes then accumulates pointer values — huge garbage counters
+        # with no error anywhere. A hard refusal here is the only honest signal.
+        refuse_pre519_tcp_recvmsg()
 
         command = [str(self.loader_path), str(self.object_path)]
         if os.geteuid() != 0:
@@ -340,6 +392,11 @@ class TcpChannelCollector:
     def read_checkpoint(self) -> list[ChannelTcpSample]:
         if self.attachment is not None:
             self.attachment.ensure_alive()
+        # Drop the pid->unit cache every checkpoint. A cache kept for the process
+        # lifetime returns the PREVIOUS owner after pid reuse and pins a transient
+        # /proc miss as "" forever; one /proc read per live pid per tick is cheap
+        # next to the bpftool dump we just did.
+        self.pid_units.clear()
         now_ns = time.time_ns()
         bucket_ns = bucket_start_ns(now_ns, self.bucket_ms)
         previous_ns = getattr(self, "_last_checkpoint_ns", None)
@@ -389,16 +446,16 @@ class TcpChannelCollector:
             if not known:
                 continue
 
-            tx_delta = counters.tx_bytes - previous.tx_bytes
-            rx_delta = counters.rx_bytes - previous.rx_bytes
-            tx_calls_delta = counters.tx_calls - previous.tx_calls
-            rx_calls_delta = counters.rx_calls - previous.rx_calls
-            connections_delta = counters.connections - previous.connections
-            if min(tx_delta, rx_delta, tx_calls_delta, rx_calls_delta, connections_delta) < 0:
-                raise RuntimeError(
-                    "TCP channel counter regression detected for socket cookie "
-                    f"{entry.key.socket_cookie}"
-                )
+            # Tolerate counter regressions instead of raising: a reloaded map
+            # (loader restart under --no-attach) or a recycled identity would
+            # otherwise KILL the collector mid-run — the UDP path already
+            # clamps for exactly this reason. The clamped interval undercounts;
+            # the next one is correct because the baseline was just replaced.
+            tx_delta = max(counters.tx_bytes - previous.tx_bytes, 0)
+            rx_delta = max(counters.rx_bytes - previous.rx_bytes, 0)
+            tx_calls_delta = max(counters.tx_calls - previous.tx_calls, 0)
+            rx_calls_delta = max(counters.rx_calls - previous.rx_calls, 0)
+            connections_delta = max(counters.connections - previous.connections, 0)
             if (
                 tx_delta <= 0
                 and rx_delta <= 0

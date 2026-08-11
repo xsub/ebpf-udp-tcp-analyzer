@@ -120,5 +120,112 @@ class TcpChannelTests(unittest.TestCase):
         self.assertEqual(unit_from_cgroup_text(text), "channel-a.service")
 
 
+class RecvmsgSignatureGateTests(unittest.TestCase):
+    def test_pre519_signature_is_detected(self):
+        from udp_analyzer.tcp_channel import kernel_tcp_recvmsg_has_nonblock
+
+        old = "int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock, int flags, int *addr_len);"
+        new = "int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags, int *addr_len);"
+        self.assertIs(kernel_tcp_recvmsg_has_nonblock(btf_text=old), True)
+        self.assertIs(kernel_tcp_recvmsg_has_nonblock(btf_text=new), False)
+        self.assertIsNone(kernel_tcp_recvmsg_has_nonblock(btf_text="int other(void);"))
+
+
+class FakeReader:
+    def __init__(self):
+        self.entries = []
+
+    def dump_entries(self):
+        return list(self.entries)
+
+
+def _entry(cookie, pid, tx=0, rx=0, txc=0, rxc=0, conns=0):
+    from udp_analyzer.tcp_channel import TcpFlowEntry, TcpFlowKey, TcpFlowValue
+    key = TcpFlowKey(socket_cookie=cookie, src_ip4=0x0A00000A, dst_ip4=0x0A7100CB,
+                     src_port=40000, dst_port=80, family=2, ip_proto=6,
+                     cgroup_id=7)
+    value = TcpFlowValue(tx_bytes=tx, rx_bytes=rx, tx_calls=txc, rx_calls=rxc,
+                         connections=conns, start_ns=0, last_ns=0,
+                         pid=pid, ifindex=0, state=1)
+    return TcpFlowEntry(key=key, value=value)
+
+
+class TcpChannelCollectorTests(unittest.TestCase):
+    """The collector itself had ZERO tests before: warmup, deltas, counter
+    regressions and the pid cache were all unverified."""
+
+    def _collector(self, monkey_unit="ffmpeg@radio-a.service"):
+        from udp_analyzer import tcp_channel as mod
+        from udp_analyzer.channels import ChannelCatalog, channel_target_from_url
+
+        target = channel_target_from_url("ffmpeg@radio-a.service",
+                                         "http://radiostream.example/x.mp3")
+        collector = mod.TcpChannelCollector(
+            catalog=ChannelCatalog([target]), bucket_ms=1000,
+            attach=False, map_id=1)
+        collector.reader = FakeReader()
+        self._units = {1234: monkey_unit}
+        collector._unit_for_pid = lambda pid: self._units.get(pid, "")
+        return collector
+
+    def test_warmup_then_delta_then_regression_clamp(self):
+        c = self._collector()
+        c.reader.entries = [_entry(1, 1234, rx=1000, rxc=10)]
+        self.assertEqual(c.read_checkpoint(), [])       # warmup: baseline only
+
+        c.reader.entries = [_entry(1, 1234, rx=4000, rxc=20)]
+        samples = c.read_checkpoint()
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].rx_bytes, 3000)     # delta, not cumulative
+        self.assertEqual(samples[0].status, "matched")
+
+        # counter REGRESSION (map reloaded): clamp to zero and survive —
+        # the old code raised RuntimeError and the process died mid-run
+        c.reader.entries = [_entry(1, 1234, rx=500, rxc=2)]
+        self.assertEqual(c.read_checkpoint(), [])       # all deltas clamp to 0
+        c.reader.entries = [_entry(1, 1234, rx=900, rxc=4)]
+        samples = c.read_checkpoint()
+        self.assertEqual(samples[0].rx_bytes, 400)      # baseline recovered
+
+    def test_packets_field_reports_syscall_count_not_zero(self):
+        c = self._collector()
+        c.reader.entries = [_entry(1, 1234, rx=1000, rxc=10)]
+        c.read_checkpoint()
+        c.reader.entries = [_entry(1, 1234, rx=2000, rxc=15, txc=1, tx=10)]
+        row = c.read_checkpoint()[0].to_dict()
+        # downstream liveness divides packets by the interval; a hardcoded 0
+        # made every TCP channel read as "not flowing" forever
+        self.assertEqual(row["packets"], 6)
+        self.assertGreater(row["bytes"], 0)
+
+    def test_pid_unit_cache_is_dropped_every_checkpoint(self):
+        from udp_analyzer import tcp_channel as mod
+        from udp_analyzer.channels import ChannelCatalog
+
+        c = mod.TcpChannelCollector(catalog=ChannelCatalog([]), bucket_ms=1000,
+                                    attach=False, map_id=1)
+        c.reader = FakeReader()
+        calls = []
+        mod_unit_for_pid = mod.unit_for_pid
+
+        def counting(pid, proc_root=None):
+            calls.append(pid)
+            return "a.service"
+
+        mod.unit_for_pid = counting
+        try:
+            c.reader.entries = [_entry(1, 99, rx=10, rxc=1)]
+            c.read_checkpoint()                 # warmup: no sample, no lookup
+            c.reader.entries = [_entry(1, 99, rx=20, rxc=2)]
+            c.read_checkpoint()
+            c.reader.entries = [_entry(1, 99, rx=30, rxc=3)]
+            c.read_checkpoint()
+            # pid resolved on EVERY emitting checkpoint: cache cleared per tick,
+            # so pid reuse cannot inherit the previous owner's channel
+            self.assertEqual(calls, [99, 99])
+        finally:
+            mod.unit_for_pid = mod_unit_for_pid
+
+
 if __name__ == "__main__":
     unittest.main()

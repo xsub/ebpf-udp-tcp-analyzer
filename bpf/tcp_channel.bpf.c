@@ -40,8 +40,17 @@ struct tcp_channel_value {
     __u32 pad;
 };
 
+/* LRU, not a plain hash: nothing ever DELETES entries here (no hook fires
+ * reliably at close for our key, and userspace only reads). The hooks see
+ * every TCP socket on the host, so with a plain PERCPU_HASH each reconnect
+ * (new cookie + source port) is a permanent entry; at 65536 the map fills
+ * and bpf_map_update_elem(BPF_NOEXIST) starts failing SILENTLY — new
+ * streams simply stop being counted, with no error anywhere. That exact
+ * failure mode is why udp_ingress grew a drops map. LRU evicts the oldest
+ * dead flows instead, so long-lived streams keep their counters and new
+ * ones are always admitted. */
 struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
     __uint(max_entries, 65536);
     __type(key, struct tcp_channel_key);
     __type(value, struct tcp_channel_value);
