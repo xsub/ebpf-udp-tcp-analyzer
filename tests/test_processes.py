@@ -80,7 +80,31 @@ class ProcessParserTests(unittest.TestCase):
             self.assertEqual(enriched[1].host_pid, 123)
             self.assertEqual(enriched[1].socket_id, 424242)
 
+            exact_sample = UdpSample(
+                bucket_start_ns=1_000_000_000,
+                bucket_ms=1000,
+                src_ip="192.0.2.10",
+                dst_ip="198.51.100.20",
+                src_port=40000,
+                dst_port=5999,
+                ifindex=2,
+                ifname="eth0",
+                packets=1,
+                bytes=1316,
+                layer="delivered",
+            )
+            exact = enricher.enrich_exact(
+                exact_sample,
+                socket_inode=424242,
+                socket_cookie=0x123456789ABCDEF0,
+            )
+
+            self.assertEqual(len(exact), 1)
+            self.assertEqual(exact[0].process_name, "ffmpeg")
+            self.assertEqual(exact[0].host_pid, 123)
+            self.assertEqual(exact[0].dst_port, 5999)
+            self.assertEqual(exact[0].socket_id, 0x123456789ABCDEF0)
+
 
 if __name__ == "__main__":
     unittest.main()
-

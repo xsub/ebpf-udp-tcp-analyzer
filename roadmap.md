@@ -3,6 +3,11 @@
 This roadmap builds a universal eBPF UDP traffic analyzer first, then validates
 it against the Dockerized `ffmpeg` vertical described in `harness.md`.
 
+This branch extends the project with outbound TCP channel attribution for a
+deployment model where each systemd user unit owns exactly one configured URL.
+The URL is configuration metadata, while eBPF measures the actual TCP socket
+traffic.
+
 ## Current Implementation Status
 
 Implemented:
@@ -17,6 +22,9 @@ Implemented:
   as a heuristic delivered layer
 - dry-run and eBPF harness runners with JSON assertions
 - CloudLinux/RHEL and Ubuntu/Debian bootstrap scripts
+- TCP channel attribution scaffold for outbound systemd user-unit traffic:
+  unit URL catalog, DNS resolution, `run-channels` CLI, TCP map parser, and
+  fentry/fexit eBPF object/loader for socket byte counters
 
 Still open:
 
@@ -25,6 +33,48 @@ Still open:
 - full Dockerized ffmpeg automated vertical with real containers
 - robust same-port multi-process support such as `SO_REUSEPORT` or multicast
 - production-grade retention/rollover for Parquet and remote databases
+- Linux verifier validation for `bpf/tcp_channel.bpf.c` across the target kernel
+  versions
+- storage schema extension for channel fields if TCP channel history should be
+  persisted alongside UDP rows
+
+## Phase TCP-A: Configured HTTPS Channel Attribution
+
+Goal: measure outbound HTTPS/TCP traffic per configured channel without parsing
+or decrypting TLS.
+
+Contract:
+
+- one systemd user unit represents exactly one channel
+- that unit exposes exactly one configured HTTP/HTTPS URL
+- several units may point at the same `host:port`
+- channel identity comes from the unit/cgroup, not from packet payload
+
+Implemented baseline:
+
+- read `.service` files from systemd user unit directories or explicit paths
+- extract a single configured URL per unit and fail if a unit contains several
+  URLs
+- resolve configured hosts to A/AAAA addresses for endpoint validation
+- add `run-channels` CLI with dry-run and eBPF collector modes
+- add `ChannelTcpSample` rows with unit, channel, URL, host, socket cookie,
+  cgroup ID, TCP byte counters, and `matched` / `unknown_unit` /
+  `unexpected_flow` status
+- add TCP eBPF hooks for `tcp_v4_connect`, `tcp_sendmsg`, `tcp_recvmsg`, and
+  `tcp_set_state`
+- add parser tests for the TCP channel BPF map layout
+
+Still open:
+
+- validate the TCP eBPF object with clang/libbpf/verifier on the target Linux
+  kernels
+- add IPv6 TCP key support in BPF and Python
+- decide whether channel TCP rows need a separate storage table or a widened
+  shared schema
+- add an end-to-end Linux harness with throwaway systemd user units and a local
+  HTTPS endpoint
+- optionally accept application-level request events when a future unit needs
+  more than one URL
 
 ## Phase 0: Project Skeleton
 

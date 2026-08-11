@@ -58,6 +58,59 @@ The project is intentionally split into:
 - storage backends: local and networked history for later Python analysis
 - harness: reproducible Dockerized ffmpeg workload
 
+## TCP Channel Attribution Extension
+
+This branch also adds an extension for outbound TCP traffic produced by
+systemd user units where the deployment contract is:
+
+```text
+one systemd user unit = one channel = one configured URL
+```
+
+The analyzer does not try to decrypt HTTPS or infer URL paths from TCP. Instead,
+it treats the systemd unit configuration as the source of HTTP semantics and
+uses eBPF only for measured TCP socket traffic:
+
+```text
+systemd user unit -> configured URL / host / port
+eBPF TCP hooks    -> socket cookie / pid / cgroup / dst_ip:port / tx-rx bytes
+Python            -> pid -> unit -> channel URL attribution
+```
+
+This remains deterministic even when many channels use the same `host:443`,
+because the channel boundary is the unit, not the remote endpoint. If a unit
+connects to an IP or port outside its configured URL, rows are emitted with
+`status=unexpected_flow`.
+
+Run a local dry-run:
+
+```sh
+PYTHONPATH=src python3 -m udp_analyzer run-channels \
+  --collector dry-run \
+  --unit-file ~/.config/systemd/user/channel-a.service
+```
+
+Build the TCP channel eBPF object and loader on Linux:
+
+```sh
+make -C bpf tcp-channel
+```
+
+Run the real TCP collector:
+
+```sh
+PYTHONPATH=src python3 -m udp_analyzer run-channels \
+  --collector ebpf \
+  --watch \
+  --unit-dir ~/.config/systemd/user
+```
+
+Example row:
+
+```json
+{"channel":"channel-a","unit":"channel-a.service","url":"https://api.example.com/foo","host":"api.example.com","dst_ip":"203.0.113.10","dst_port":443,"tx_bytes":1201,"rx_bytes":64001,"connections":1,"status":"matched","layer":"tcp_channel"}
+```
+
 ## Text Screenshots
 
 Dry-run table output:
