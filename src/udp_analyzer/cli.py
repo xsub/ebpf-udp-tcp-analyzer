@@ -6,10 +6,20 @@ import time
 from pathlib import Path
 from typing import Optional, Union
 
+from .channels import (
+    ChannelCatalog,
+    default_user_unit_paths,
+    load_channel_targets,
+)
 from .collectors import DryRunCollector, EbpfCollector
 from .models import SampleFilter
 from .output import emit_samples
 from .processes import ProcessSocketEnricher
+from .tcp_channel import (
+    ChannelSampleFilter,
+    TcpChannelCollector,
+    TcpChannelDryRunCollector,
+)
 from .writers import (
     ClickHouseHttpWriter,
     DuckDBWriter,
@@ -101,6 +111,63 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--layer", choices=["ingress", "delivered"])
     run.set_defaults(func=run_analyzer)
 
+    channels = subparsers.add_parser(
+        "run-channels",
+        help="run configured systemd user-unit TCP channel attribution",
+    )
+    channels.add_argument("--collector", choices=["dry-run", "ebpf"], default="dry-run")
+    channels.add_argument("--bucket-ms", type=int, default=1000)
+    channels.add_argument("--watch", action="store_true", help="keep polling checkpoints")
+    channels.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        help="stop after N seconds; implies --watch",
+    )
+    channels.add_argument("--output", choices=["table", "json", "none"], default="table")
+    channels.add_argument(
+        "--unit-dir",
+        action="append",
+        default=[],
+        help="directory containing systemd user .service units; repeatable",
+    )
+    channels.add_argument(
+        "--unit-file",
+        action="append",
+        default=[],
+        help="single systemd user unit file to read; repeatable",
+    )
+    channels.add_argument(
+        "--no-default-unit-dirs",
+        action="store_true",
+        help="do not scan ~/.config/systemd/user, /etc/systemd/user, /usr/lib/systemd/user",
+    )
+    channels.add_argument(
+        "--no-resolve-dns",
+        action="store_true",
+        help="do not resolve configured hosts before matching flows",
+    )
+    channels.add_argument("--tcp-bpf-object", default="bpf/tcp_channel.bpf.o")
+    channels.add_argument("--tcp-loader", default="bpf/tcp_channel_loader")
+    channels.add_argument(
+        "--tcp-map-id",
+        type=int,
+        help="existing tcp_channel_flows map ID to read together with --no-attach",
+    )
+    channels.add_argument(
+        "--no-attach",
+        action="store_true",
+        help="read an already loaded TCP channel map instead of attaching BPF",
+    )
+    channels.add_argument("--channel")
+    channels.add_argument("--unit")
+    channels.add_argument("--host")
+    channels.add_argument(
+        "--status",
+        choices=["matched", "unknown_unit", "unexpected_flow"],
+    )
+    channels.set_defaults(func=run_channel_analyzer)
+
     return parser
 
 
@@ -172,6 +239,46 @@ def run_analyzer(args: argparse.Namespace) -> None:
         writer.close()
 
 
+def run_channel_analyzer(args: argparse.Namespace) -> None:
+    sample_filter = ChannelSampleFilter(
+        channel=args.channel,
+        unit=args.unit,
+        host=args.host,
+        status=args.status,
+    )
+    collector = create_channel_collector(args, sample_filter)
+    watch = args.watch or args.duration is not None
+    deadline = time.monotonic() + args.duration if args.duration is not None else None
+
+    stopping = False
+
+    def _on_signal(signum, _frame):
+        nonlocal stopping
+        stopping = True
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(_sig, _on_signal)
+        except (ValueError, OSError):
+            pass
+
+    try:
+        while True:
+            samples = collector.read_checkpoint()
+            emit_samples(samples, args.output)
+
+            if not watch or stopping:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(args.bucket_ms / 1000)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        collector.close()
+
+
 def create_collector(
     args: argparse.Namespace, sample_filter: SampleFilter
 ) -> Union[DryRunCollector, EbpfCollector]:
@@ -214,6 +321,56 @@ def create_collector(
             receive_map_id=args.receive_map_id,
         )
     raise RuntimeError(f"unsupported collector: {collector_name}")
+
+
+def create_channel_collector(
+    args: argparse.Namespace, sample_filter: ChannelSampleFilter
+) -> Union[TcpChannelDryRunCollector, TcpChannelCollector]:
+    bucket_ms = args.bucket_ms
+    if bucket_ms <= 0:
+        raise RuntimeError("--bucket-ms must be greater than zero")
+
+    catalog = load_channel_catalog(args)
+    if args.collector == "dry-run":
+        return TcpChannelDryRunCollector(
+            catalog=catalog,
+            bucket_ms=bucket_ms,
+            sample_filter=sample_filter,
+        )
+    if args.collector == "ebpf":
+        return TcpChannelCollector(
+            catalog=catalog,
+            bucket_ms=bucket_ms,
+            sample_filter=sample_filter,
+            object_path=Path(args.tcp_bpf_object),
+            loader_path=Path(args.tcp_loader),
+            map_id=args.tcp_map_id,
+            attach=not args.no_attach,
+        )
+    raise RuntimeError(f"unsupported channel collector: {args.collector}")
+
+
+def load_channel_catalog(args: argparse.Namespace) -> ChannelCatalog:
+    paths = [Path(path) for path in args.unit_file]
+    for raw_dir in args.unit_dir:
+        directory = Path(raw_dir)
+        try:
+            paths.extend(
+                sorted(
+                    child
+                    for child in directory.iterdir()
+                    if child.name.endswith(".service")
+                )
+            )
+        except OSError:
+            continue
+    if not args.no_default_unit_dirs:
+        paths.extend(default_user_unit_paths())
+    targets = load_channel_targets(paths)
+    catalog = ChannelCatalog(targets)
+    if not args.no_resolve_dns:
+        catalog = catalog.resolve()
+    return catalog
 
 
 def create_writer(args: argparse.Namespace):
