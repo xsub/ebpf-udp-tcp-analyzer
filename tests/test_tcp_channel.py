@@ -124,11 +124,23 @@ class RecvmsgSignatureGateTests(unittest.TestCase):
     def test_pre519_signature_is_detected(self):
         from udp_analyzer.tcp_channel import kernel_tcp_recvmsg_has_nonblock
 
-        old = "int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock, int flags, int *addr_len);"
-        new = "int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags, int *addr_len);"
+        # RAW `bpftool btf dump` format, verbatim from a live kernel: a FUNC
+        # entry pointing at a FUNC_PROTO whose param names decide the answer.
+        new = (
+            "[53321] FUNC_PROTO '(anon)' ret_type_id=13 vlen=5\n"
+            "\t'sk' type_id=700\n\t'msg' type_id=6066\n\t'len' type_id=46\n"
+            "\t'flags' type_id=13\n\t'addr_len' type_id=92\n"
+            "[86073] FUNC 'tcp_recvmsg' type_id=53321 linkage=static\n"
+        )
+        old = (
+            "[53321] FUNC_PROTO '(anon)' ret_type_id=13 vlen=6\n"
+            "\t'sk' type_id=700\n\t'msg' type_id=6066\n\t'len' type_id=46\n"
+            "\t'nonblock' type_id=13\n\t'flags' type_id=13\n\t'addr_len' type_id=92\n"
+            "[86073] FUNC 'tcp_recvmsg' type_id=53321 linkage=static\n"
+        )
         self.assertIs(kernel_tcp_recvmsg_has_nonblock(btf_text=old), True)
         self.assertIs(kernel_tcp_recvmsg_has_nonblock(btf_text=new), False)
-        self.assertIsNone(kernel_tcp_recvmsg_has_nonblock(btf_text="int other(void);"))
+        self.assertIsNone(kernel_tcp_recvmsg_has_nonblock(btf_text="[1] INT 'int'"))
 
 
 class FakeReader:

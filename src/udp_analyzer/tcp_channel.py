@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import socket
 import struct
@@ -203,19 +204,29 @@ def kernel_tcp_recvmsg_has_nonblock(btf_text: Optional[str] = None) -> Optional[
     """
     if btf_text is None:
         try:
+            # RAW dump, not `format c`: the C form is vmlinux.h — types only,
+            # no function prototypes — so grepping it can never find the
+            # answer. The raw form lists FUNC/FUNC_PROTO entries with
+            # parameter names (verified against a live 6.8 kernel).
             proc = subprocess.run(
-                ["bpftool", "btf", "dump", "file", KERNEL_BTF_PATH, "format", "c"],
-                capture_output=True, text=True, timeout=60,
+                ["bpftool", "btf", "dump", "file", KERNEL_BTF_PATH],
+                capture_output=True, text=True, timeout=120,
             )
         except (OSError, subprocess.SubprocessError):
             return None
         if proc.returncode != 0 or not proc.stdout:
             return None
         btf_text = proc.stdout
-    for line in btf_text.splitlines():
-        if "tcp_recvmsg(" in line:
-            return "nonblock" in line
-    return None
+    func = re.search(r"FUNC 'tcp_recvmsg' type_id=(\d+)", btf_text)
+    if not func:
+        return None
+    proto = re.search(
+        rf"^\[{func.group(1)}\] FUNC_PROTO[^\n]*((?:\n\t[^\n]*)*)",
+        btf_text, re.M,
+    )
+    if not proto:
+        return None
+    return "'nonblock'" in proto.group(1)
 
 
 def refuse_pre519_tcp_recvmsg() -> None:
