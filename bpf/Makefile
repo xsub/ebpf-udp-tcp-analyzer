@@ -22,13 +22,15 @@ else
 BPF_ARCH := $(UNAME_ARCH)
 endif
 
-.PHONY: all full receive clean
+.PHONY: all full receive tcp-channel clean
 
 all: udp_ingress.bpf.o
 
-full: all receive
+full: all receive tcp-channel
 
 receive: udp_receive.bpf.o udp_receive_loader
+
+tcp-channel: tcp_channel.bpf.o tcp_channel_loader
 
 udp_ingress.bpf.o: udp_ingress.bpf.c
 	$(BPF_CLANG) $(BPF_CFLAGS) -c $< -o $@
@@ -44,5 +46,11 @@ udp_receive.bpf.o: udp_receive.bpf.c vmlinux.h
 udp_receive_loader: udp_receive_loader.c
 	$(CC) $(HOST_CFLAGS) $$(pkg-config --cflags libbpf) -o $@ $< $$(pkg-config --libs libbpf) -lelf -lz
 
+tcp_channel.bpf.o: tcp_channel.bpf.c vmlinux.h
+	$(BPF_CLANG) $(BPF_CORE_CFLAGS) -D__TARGET_ARCH_$(BPF_ARCH) -I. -c $< -o $@
+
+tcp_channel_loader: tcp_channel_loader.c
+	$(CC) $(HOST_CFLAGS) $$(pkg-config --cflags libbpf) -o $@ $< $$(pkg-config --libs libbpf) -lelf -lz
+
 clean:
-	rm -f *.o udp_receive_loader vmlinux.h vmlinux.h.tmp
+	rm -f *.o udp_receive_loader tcp_channel_loader vmlinux.h vmlinux.h.tmp

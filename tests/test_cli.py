@@ -1,8 +1,11 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest import mock
 
-from udp_analyzer.cli import build_parser, create_collector
+from udp_analyzer.cli import build_parser, create_channel_collector, create_collector
 from udp_analyzer.models import SampleFilter
+from udp_analyzer.tcp_channel import ChannelSampleFilter, TcpChannelDryRunCollector
 
 
 class CliAttributionTests(unittest.TestCase):
@@ -55,6 +58,34 @@ class CliAttributionTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "cannot be combined"):
             create_collector(args, SampleFilter())
+
+    def test_channel_dry_run_loads_one_url_per_unit(self):
+        with tempfile.TemporaryDirectory() as raw_dir:
+            unit = Path(raw_dir) / "channel-a.service"
+            unit.write_text(
+                "[Service]\nEnvironment=URL=https://api.example.com/foo\n",
+                encoding="utf-8",
+            )
+            args = self.parser.parse_args(
+                [
+                    "run-channels",
+                    "--collector",
+                    "dry-run",
+                    "--no-default-unit-dirs",
+                    "--no-resolve-dns",
+                    "--unit-file",
+                    str(unit),
+                ]
+            )
+
+            collector = create_channel_collector(args, ChannelSampleFilter())
+
+        self.assertIsInstance(collector, TcpChannelDryRunCollector)
+        self.assertEqual(collector.catalog.targets[0].unit, "channel-a.service")
+        self.assertEqual(
+            collector.catalog.targets[0].url,
+            "https://api.example.com/foo",
+        )
 
 
 if __name__ == "__main__":
