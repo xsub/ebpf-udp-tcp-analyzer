@@ -3,7 +3,7 @@
 This roadmap builds a universal eBPF UDP traffic analyzer first, then validates
 it against the Dockerized `ffmpeg` vertical described in `harness.md`.
 
-This branch extends the project with outbound TCP channel attribution for a
+The project includes outbound TCP channel attribution (mainline) for a
 deployment model where each systemd user unit owns exactly one configured URL.
 The URL is configuration metadata, while eBPF measures the actual TCP socket
 traffic.

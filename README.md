@@ -1,15 +1,19 @@
-# ebpf-udp-analyzer
+# ebpf-udp-tcp-analyzer
+
+(previously `ebpf-udp-analyzer` — GitHub redirects the old URL)
 
 ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
 ![eBPF](https://img.shields.io/badge/eBPF-enabled-orange)
 ![Linux](https://img.shields.io/badge/platform-linux-green)
 
-Universal eBPF UDP traffic analyzer with Python user space, checkpointed storage,
-and a Docker/ffmpeg vertical harness.
+Universal eBPF UDP **and TCP** traffic analyzer with Python user space,
+checkpointed storage, and a Docker/ffmpeg vertical harness. UDP flows are
+measured on the wire (tc ingress + optional receive-side socket attribution);
+TCP channels are attributed per systemd unit (one unit = one channel = one URL).
 
 ## What It Does
 
-`ebpf-udp-analyzer` monitors incoming IPv4 UDP traffic on a Linux interface.
+The UDP side monitors incoming IPv4 UDP traffic on a Linux interface.
 The eBPF program runs at `tc ingress` and updates in-kernel counters keyed by:
 
 - source IP
@@ -58,9 +62,10 @@ The project is intentionally split into:
 - storage backends: local and networked history for later Python analysis
 - harness: reproducible Dockerized ffmpeg workload
 
-## TCP Channel Attribution Extension
+## TCP Channel Attribution
 
-This branch also adds an extension for outbound TCP traffic produced by
+The TCP side (mainline since the tcp-attribution-v2 merge) attributes outbound
+TCP traffic produced by
 systemd user units where the deployment contract is:
 
 ```text
@@ -104,6 +109,12 @@ PYTHONPATH=src python3 -m udp_analyzer run-channels \
   --watch \
   --unit-dir ~/.config/systemd/user
 ```
+
+Deployment note: for a long-running monitor, run `run-channels` from a systemd
+unit with `--output json` appended (`>>`) to an NDJSON file — TCP rows may share
+the file with the UDP monitor's rows (consumers dispatch on `layer`). Validated
+against ground truth on a production radio recorder (46 HTTP streams, 15 min:
+96.6% `matched`, 128.2 kbps per channel vs 133.5 kbps on disk after transcode).
 
 Example row:
 
