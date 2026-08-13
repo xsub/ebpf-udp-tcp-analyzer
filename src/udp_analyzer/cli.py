@@ -20,6 +20,10 @@ from .tcp_channel import (
     TcpChannelCollector,
     TcpChannelDryRunCollector,
 )
+from .udp_channel import (
+    UdpChannelCollector,
+    UdpChannelDryRunCollector,
+)
 from .writers import (
     ClickHouseHttpWriter,
     DuckDBWriter,
@@ -157,7 +161,20 @@ def build_parser() -> argparse.ArgumentParser:
     channels.add_argument(
         "--no-attach",
         action="store_true",
-        help="read an already loaded TCP channel map instead of attaching BPF",
+        help="read an already loaded channel map instead of attaching BPF",
+    )
+    channels.add_argument(
+        "--proto",
+        choices=["tcp", "udp"],
+        default="tcp",
+        help="channel transport: tcp (radio HTTP, default) or udp (multicast TV)",
+    )
+    channels.add_argument("--udp-bpf-object", default="bpf/udp_channel.bpf.o")
+    channels.add_argument("--udp-loader", default="bpf/udp_channel_loader")
+    channels.add_argument(
+        "--udp-map-id",
+        type=int,
+        help="existing udp_channel_flows map ID to read together with --no-attach",
     )
     channels.add_argument("--channel")
     channels.add_argument("--unit")
@@ -325,12 +342,32 @@ def create_collector(
 
 def create_channel_collector(
     args: argparse.Namespace, sample_filter: ChannelSampleFilter
-) -> Union[TcpChannelDryRunCollector, TcpChannelCollector]:
+) -> Union[TcpChannelDryRunCollector, TcpChannelCollector,
+           UdpChannelDryRunCollector, UdpChannelCollector]:
     bucket_ms = args.bucket_ms
     if bucket_ms <= 0:
         raise RuntimeError("--bucket-ms must be greater than zero")
 
     catalog = load_channel_catalog(args)
+    # Tor wg --proto: udp (multicast TV, per-cgroup na fexit udp_recvmsg) vs tcp (radio HTTP).
+    if getattr(args, "proto", "tcp") == "udp":
+        if args.collector == "dry-run":
+            return UdpChannelDryRunCollector(
+                catalog=catalog,
+                bucket_ms=bucket_ms,
+                sample_filter=sample_filter,
+            )
+        if args.collector == "ebpf":
+            return UdpChannelCollector(
+                catalog=catalog,
+                bucket_ms=bucket_ms,
+                sample_filter=sample_filter,
+                object_path=Path(args.udp_bpf_object),
+                loader_path=Path(args.udp_loader),
+                map_id=args.udp_map_id,
+                attach=not args.no_attach,
+            )
+        raise RuntimeError(f"unsupported channel collector: {args.collector}")
     if args.collector == "dry-run":
         return TcpChannelDryRunCollector(
             catalog=catalog,
