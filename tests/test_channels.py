@@ -113,7 +113,8 @@ class TemplateUnitTests(unittest.TestCase):
                      "SEGMENT_SECONDS=900\nOUTPUT_PATTERN=/rec/%Y/radio-a/R.aac\n")
             self._mk(env_dir, "radio-b.env",
                      "INPUT_URL=http://radiostream.example/tuba9.mp3\n")
-            # a TV instance with a udp:// input is NOT an http channel: skipped
+            # a TV instance with a udp:// (multicast) input — teraz TEŻ poprawny
+            # kanał (tor UDP per-cgroup), nie pomijany jak dawniej
             self._mk(env_dir, "tv-a.env",
                      "INPUT_URL=udp://239.1.2.3:1234?fifo_size=5\n")
             template = self._mk(raw_dir, "ffmpeg@.service",
@@ -124,10 +125,14 @@ class TemplateUnitTests(unittest.TestCase):
             self.assertEqual(
                 [(t.unit, t.channel) for t in targets],
                 [("ffmpeg@radio-a.service", "radio-a"),
-                 ("ffmpeg@radio-b.service", "radio-b")],
+                 ("ffmpeg@radio-b.service", "radio-b"),
+                 ("ffmpeg@tv-a.service", "tv-a")],
             )
             self.assertEqual(targets[0].url,
                              "http://radiostream.example/tuba145-1.mp3")
+            # kanał multicast: schemat/host/port wyciągnięte, gotowe dla toru UDP
+            tv = next(t for t in targets if t.channel == "tv-a")
+            self.assertEqual((tv.scheme, tv.host, tv.port), ("udp", "239.1.2.3", 1234))
             self.assertEqual(targets[0].port, 80)
 
     def test_template_instance_match_uses_full_instance_unit_name(self):

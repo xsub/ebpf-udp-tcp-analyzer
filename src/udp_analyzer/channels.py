@@ -10,7 +10,7 @@ from typing import Callable, Iterable, Optional
 from urllib.parse import urlparse
 
 
-URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+URL_RE = re.compile(r"(?:https?|udp|rtp)://[^\s\"'<>]+")
 SYSTEMD_UNIT_SUFFIXES = (".service",)
 DEFAULT_USER_UNIT_DIRS = (
     Path("~/.config/systemd/user").expanduser(),
@@ -253,12 +253,15 @@ def cleanup_url(url: str) -> str:
 
 def channel_target_from_url(unit: str, url: str) -> ChannelTarget:
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"}:
-        raise RuntimeError(f"{unit} URL must use http or https: {url}")
+    if parsed.scheme not in {"http", "https", "udp", "rtp"}:
+        raise RuntimeError(f"{unit} URL must use http, https, udp or rtp: {url}")
     if not parsed.hostname:
         raise RuntimeError(f"{unit} URL has no host: {url}")
     port = parsed.port
     if port is None:
+        # UDP/RTP (multicast) nie ma sensownego portu domyslnego — inaczej niz HTTP.
+        if parsed.scheme in {"udp", "rtp"}:
+            raise RuntimeError(f"{unit} UDP/RTP URL needs explicit port: {url}")
         port = 443 if parsed.scheme == "https" else 80
     path = parsed.path or "/"
     if parsed.query:
